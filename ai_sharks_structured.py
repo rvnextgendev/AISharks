@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import os
 from dataclasses import dataclass
+from contextvars import ContextVar
 from getpass import getpass
 from pathlib import Path
 from typing import Literal, TypedDict
@@ -96,6 +97,7 @@ class PanelState(TypedDict):
 
 
 # 3. Configuration and reusable helpers
+_SESSION_KEY: ContextVar[str | None] = ContextVar("groq_session_key", default=None)
 MODEL = "openai/gpt-oss-120b"
 MAX_CONCURRENT_CALLS = 2
 
@@ -112,7 +114,8 @@ def configure() -> None:
 
 def new_llm(temperature: float = 0.3) -> ChatGroq:
     return ChatGroq(
-        model=os.getenv("GROQ_MODEL", MODEL),
+        model=MODEL if _SESSION_KEY.get() else os.getenv("GROQ_MODEL", MODEL),
+        api_key=_SESSION_KEY.get() or os.getenv("GROQ_API_KEY"),
         temperature=temperature,
         max_retries=2,
         timeout=60,
@@ -203,16 +206,23 @@ def build_panel():
     return graph.compile()
 
 
-async def run_panel(pitch: str) -> PanelState:
+async def run_panel(pitch: str, *, api_key: str | None = None) -> PanelState:
     if not pitch.strip():
         raise ValueError("Pitch cannot be empty.")
-    configure()
-    result = await build_panel().ainvoke({
-        "pitch": pitch, "round1": [], "final": [], "summary": ""
-    })
-    if any(len(result[key]) != len(SHARKS) for key in ("round1", "final")):
-        raise RuntimeError("Incomplete panel results.")
-    return result
+    if api_key is None:
+        configure()
+    elif not api_key.strip():
+        raise ValueError("Groq API key is required.")
+    token = _SESSION_KEY.set(api_key.strip() if api_key is not None else None)
+    try:
+        result = await build_panel().ainvoke({
+            "pitch": pitch, "round1": [], "final": [], "summary": ""
+        })
+        if any(len(result[key]) != len(SHARKS) for key in ("round1", "final")):
+            raise RuntimeError("Incomplete panel results.")
+        return result
+    finally:
+        _SESSION_KEY.reset(token)
 
 
 # 5. Sample pitch and command-line entry point
